@@ -1,0 +1,59 @@
+name: Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Lint HTML
+        run: npx --yes htmlhint index.html
+
+      - name: Build local container
+        run: docker build -t local-test-site .
+
+      - name: Smoke test container
+        run: |
+          docker run -d --name smoke-app -p 8080:80 local-test-site
+          sleep 2
+          RESPONSE=$(curl -s http://localhost:8080)
+          echo "$RESPONSE" | grep -q "ФИО"
+          echo "OK"
+          docker stop smoke-app && docker rm smoke-app
+
+  release:
+    needs: ci
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Downcase repo name
+        run: |
+          echo "IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}" | tr '[A-Z]' '[a-z]' >> $GITHUB_ENV
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:latest
