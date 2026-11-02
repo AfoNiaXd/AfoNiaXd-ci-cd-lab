@@ -2,43 +2,65 @@ name: Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
-
-permissions:
-  contents: read
-  packages: write
+    branches: [main]
 
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Lint HTML
-        run: npx --yes htmlhint index.html
+        run: npx --yes htmlhint@1 index.html
 
-      - name: Build local container
-        run: docker build -t local-test-site .
+      - name: Build image
+        if: ${{ !cancelled() }}
+        run: docker build -t lab:ci .
 
       - name: Smoke test container
+        if: ${{ !cancelled() }}
         run: |
-          docker run -d --name smoke-app -p 8080:80 local-test-site
-          sleep 2
-          RESPONSE=$(curl -s http://localhost:8080)
-          echo "$RESPONSE" | grep -q "ФИО"
+          set +e
+          docker run -d -p 8080:80 --name lab-ci lab:ci
+          for i in $(seq 1 10); do
+            curl -s http://localhost:8080 > page.html && break
+            sleep 1
+          done
+          echo "--- page content ---"
+          cat page.html
+          echo "--- checks ---"
+          grep -q "</html>" page.html
+          code=$?
+          echo "grep '</html>' exit code: $code"
+          if [ "$code" -ne 0 ]; then
+            echo "FAIL: page is broken"
+            exit 1
+          fi
+          grep -qi "${{ github.repository_owner }}" page.html
+          code=$?
+          echo "grep owner exit code: $code"
+          if [ "$code" -ne 0 ]; then
+            echo "FAIL: GitHub nick not found on page"
+            exit 1
+          fi
           echo "OK"
-          docker stop smoke-app && docker rm smoke-app
 
   release:
     needs: ci
-    runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -47,13 +69,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Downcase repo name
-        run: |
-          echo "IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}" | tr '[A-Z]' '[a-z]' >> $GITHUB_ENV
-
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_NAME }}:latest
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
